@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: korenxt-fineract
+    runtime: docker
+    repo: https://github.com/jayjpa-code/mifos-x
+    branch: dev
+    region: singapore
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /fineract-provider/actuator/health
+    envVars:
+      - key: DB_HOST
+        fromDatabase:
+          name: korenxt-fineract-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: korenxt-fineract-db
+          property: port
+      - key: DB_USER
+        fromDatabase:
+          name: korenxt-fineract-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: korenxt-fineract-db
+          property: password
+      - key: FINERACT_DEFAULT_TENANTDB_MASTER_PASSWORD
+        generateValue: true
+      - key: FINERACT_DEFAULT_TENANTDB_NAME
+        value: fineract_default
+      - key: FINERACT_DEFAULT_TENANTDB_IDENTIFIER
+        value: default
+      - key: FINERACT_DEFAULT_TENANTDB_DESCRIPTION
+        value: KoreNXT Mifos Default Tenant
+      - key: FINERACT_DEFAULT_TENANTDB_TIMEZONE
+        value: Asia/Manila
+      - key: FINERACT_SECURITY_CORS_ENABLED
+        value: "true"
+      - key: FINERACT_SECURITY_CORS_ALLOWED_ORIGIN_PATTERNS
+        value: https://*.netlify.app,https://*.korenxt.com,http://localhost:*
+      - key: FINERACT_SECURITY_CORS_ALLOWED_METHODS
+        value: "*"
+      - key: FINERACT_SECURITY_CORS_ALLOWED_HEADERS
+        value: "*"
+      - key: FINERACT_SECURITY_CORS_EXPOSED_HEADERS
+        value: "*"
+      - key: FINERACT_SECURITY_CORS_ALLOW_CREDENTIALS
+        value: "true"
+      - key: FINERACT_SECURITY_HSTS_ENABLED
+        value: "true"
+      - key: FINERACT_SERVER_SSL_ENABLED
+        value: "false"
+      - key: FINERACT_HIKARI_MINIMUM_IDLE
+        value: "1"
+      - key: FINERACT_HIKARI_MAXIMUM_POOL_SIZE
+        value: "5"
+      - key: FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE
+        value: health,info
+
+databases:
+  - name: korenxt-fineract-db
+    region: singapore
+    plan: free
+    databaseName: fineract_tenants
+    user: fineract
+    postgresMajorVersion: "18"

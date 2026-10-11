@@ -1,0 +1,34 @@
+name: Validate Render Fineract Deployment
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - render.yaml
+      - Dockerfile
+      - render-start.sh
+      - .github/workflows/render-validate.yml
+  pull_request:
+    paths:
+      - render.yaml
+      - Dockerfile
+      - render-start.sh
+      - .github/workflows/render-validate.yml
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Render CLI
+        run: curl -fsSL https://raw.githubusercontent.com/render-oss/cli/main/bin/install.sh | sh
+
+      - name: Validate Render Blueprint
+        run: render blueprints validate render.yaml
+
+      - name: Build Fineract Render image
+        run: docker build --pull -t korenxt-fineract-render:ci .

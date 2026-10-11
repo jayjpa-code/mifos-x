@@ -17,6 +17,10 @@ services:
         fromDatabase:
           name: korenxt-fineract-db
           property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: korenxt-fineract-db
+          property: database
       - key: DB_USER
         fromDatabase:
           name: korenxt-fineract-db

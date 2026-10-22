@@ -49,12 +49,25 @@ if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
 fi
 unset PGPASSWORD
 
-# Render terminates TLS at the edge. Bind its public port immediately and proxy
-# to Fineract's internal HTTP port so slow Spring startup does not fail Render's
-# port scan. Connections will succeed as soon as Fineract is ready.
-socat TCP-LISTEN:"${PUBLIC_PORT}",fork,reuseaddr TCP:127.0.0.1:"${FINERACT_INTERNAL_PORT}" &
-PROXY_PID=$!
-trap 'kill ${PROXY_PID} 2>/dev/null || true' EXIT INT TERM
+# Render needs an HTTP listener immediately while the large Spring application
+# warms up. Serve a tiny bootstrap page on the public port first. The configured
+# health-check path intentionally remains 404 during warm-up, so Render will not
+# mark the deploy healthy until real Fineract takes over.
+BOOTSTRAP_ROOT="/tmp/render-bootstrap"
+mkdir -p "${BOOTSTRAP_ROOT}"
+printf '%s\n' 'KoreNXT Fineract is starting' > "${BOOTSTRAP_ROOT}/index.html"
+busybox httpd -f -p "0.0.0.0:${PUBLIC_PORT}" -h "${BOOTSTRAP_ROOT}" &
+BOOTSTRAP_PID=$!
+PROXY_PID=""
+WATCH_PID=""
+JAVA_PID=""
+
+cleanup() {
+  [ -z "${WATCH_PID}" ] || kill "${WATCH_PID}" 2>/dev/null || true
+  [ -z "${PROXY_PID}" ] || kill "${PROXY_PID}" 2>/dev/null || true
+  [ -z "${BOOTSTRAP_PID}" ] || kill "${BOOTSTRAP_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 export FINERACT_SERVER_SSL_ENABLED="false"
 export FINERACT_SERVER_PORT="${FINERACT_INTERNAL_PORT}"
@@ -68,4 +81,20 @@ export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx240m -XX:MaxMetaspace
 # Jib-generated Fineract images expose the calculated runtime classpath and main class here.
 java -cp @/app/jib-classpath-file @/app/jib-main-class-file &
 JAVA_PID=$!
+
+# As soon as Fineract opens its internal HTTP port, replace the bootstrap server
+# with a transparent TCP proxy from Render's public port to Fineract.
+(
+  while kill -0 "${JAVA_PID}" 2>/dev/null; do
+    if socat -T1 -u /dev/null "TCP:127.0.0.1:${FINERACT_INTERNAL_PORT}" >/dev/null 2>&1; then
+      echo "Fineract is accepting connections on ${FINERACT_INTERNAL_PORT}; switching public traffic"
+      kill "${BOOTSTRAP_PID}" 2>/dev/null || true
+      wait "${BOOTSTRAP_PID}" 2>/dev/null || true
+      exec socat "TCP-LISTEN:${PUBLIC_PORT},fork,reuseaddr" "TCP:127.0.0.1:${FINERACT_INTERNAL_PORT}"
+    fi
+    sleep 2
+  done
+) &
+WATCH_PID=$!
+
 wait "${JAVA_PID}"

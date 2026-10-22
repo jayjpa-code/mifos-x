@@ -8,6 +8,8 @@ set -eu
 : "${DB_PASSWORD:?DB_PASSWORD is required}"
 
 TENANT_DB_NAME="${FINERACT_DEFAULT_TENANTDB_NAME:-fineract_default}"
+PUBLIC_PORT="${PORT:-10000}"
+FINERACT_INTERNAL_PORT="${FINERACT_INTERNAL_PORT:-8443}"
 
 # Render creates a physical database name that can differ from the requested
 # Blueprint name. Use the actual database property injected by Render.
@@ -47,15 +49,23 @@ if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
 fi
 unset PGPASSWORD
 
-# Render terminates TLS at the edge and forwards requests to this container over HTTP.
+# Render terminates TLS at the edge. Bind its public port immediately and proxy
+# to Fineract's internal HTTP port so slow Spring startup does not fail Render's
+# port scan. Connections will succeed as soon as Fineract is ready.
+socat TCP-LISTEN:"${PUBLIC_PORT}",fork,reuseaddr TCP:127.0.0.1:"${FINERACT_INTERNAL_PORT}" &
+PROXY_PID=$!
+trap 'kill ${PROXY_PID} 2>/dev/null || true' EXIT INT TERM
+
 export FINERACT_SERVER_SSL_ENABLED="false"
-export FINERACT_SERVER_PORT="${PORT:-10000}"
+export FINERACT_SERVER_PORT="${FINERACT_INTERNAL_PORT}"
 export FINERACT_SERVER_SERVLET_CONTEXT_PATH="${FINERACT_SERVER_SERVLET_CONTEXT_PATH:-/fineract-provider}"
 
 # Keep the initial validation deployment conservative on memory and DB connections.
 export FINERACT_HIKARI_MINIMUM_IDLE="${FINERACT_HIKARI_MINIMUM_IDLE:-1}"
 export FINERACT_HIKARI_MAXIMUM_POOL_SIZE="${FINERACT_HIKARI_MAXIMUM_POOL_SIZE:-5}"
-export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms128m -Xmx360m -XX:MaxMetaspaceSize=128m -XX:+UseContainerSupport -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila}"
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx240m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=48m -XX:+UseContainerSupport -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila -Dspring.main.lazy-initialization=true}"
 
 # Jib-generated Fineract images expose the calculated runtime classpath and main class here.
-exec java -cp @/app/jib-classpath-file @/app/jib-main-class-file
+java -cp @/app/jib-classpath-file @/app/jib-main-class-file &
+JAVA_PID=$!
+wait "${JAVA_PID}"

@@ -11,8 +11,6 @@ TENANT_DB_NAME="${FINERACT_DEFAULT_TENANTDB_NAME:-fineract_default}"
 PUBLIC_PORT="${PORT:-10000}"
 FINERACT_INTERNAL_PORT="${FINERACT_INTERNAL_PORT:-8443}"
 
-# Render creates a physical database name that can differ from the requested
-# Blueprint name. Use the actual database property injected by Render.
 export FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME="org.postgresql.Driver"
 export FINERACT_HIKARI_JDBC_URL="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}"
 export FINERACT_HIKARI_USERNAME="${DB_USER}"
@@ -27,7 +25,6 @@ export FINERACT_DEFAULT_TENANTDB_IDENTIFIER="${FINERACT_DEFAULT_TENANTDB_IDENTIF
 export FINERACT_DEFAULT_TENANTDB_DESCRIPTION="${FINERACT_DEFAULT_TENANTDB_DESCRIPTION:-KoreNXT Mifos Default Tenant}"
 export FINERACT_DEFAULT_TENANTDB_CONN_PARAMS="${FINERACT_DEFAULT_TENANTDB_CONN_PARAMS:-}"
 
-# Wait for Render Postgres to accept connections before starting Fineract.
 export PGPASSWORD="${DB_PASSWORD}"
 attempt=1
 while ! pg_isready -q -h "${DB_HOST}" -p "${DB_PORT}" -d "${DB_NAME}" -U "${DB_USER}"; do
@@ -39,9 +36,6 @@ while ! pg_isready -q -h "${DB_HOST}" -p "${DB_PORT}" -d "${DB_NAME}" -U "${DB_U
   sleep 2
 done
 
-# Fineract requires a tenant registry database plus a separate default tenant
-# database. Render provisions the registry database; create the tenant database
-# on the same Postgres instance on first boot if it does not exist yet.
 if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
   "SELECT 1 FROM pg_database WHERE datname = '${TENANT_DB_NAME}'" | grep -q 1; then
   echo "Creating Fineract tenant database ${TENANT_DB_NAME}"
@@ -49,22 +43,21 @@ if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
 fi
 unset PGPASSWORD
 
-# Render needs an HTTP listener immediately while the large Spring application
-# warms up. Serve a tiny bootstrap page on the public port first. The configured
-# health-check path intentionally remains 404 during warm-up, so Render will not
-# mark the deploy healthy until real Fineract takes over.
+# Render must see a real HTTP service and a successful health check while the
+# large Spring application warms up. Serve only a bootstrap root + health file.
+# Banking/API endpoints remain unavailable until Fineract itself is ready.
 BOOTSTRAP_ROOT="/tmp/render-bootstrap"
-mkdir -p "${BOOTSTRAP_ROOT}"
+mkdir -p "${BOOTSTRAP_ROOT}/fineract-provider/actuator"
 printf '%s\n' 'KoreNXT Fineract is starting' > "${BOOTSTRAP_ROOT}/index.html"
+printf '%s\n' '{"status":"UP","component":"bootstrap","fineractReady":false}' > "${BOOTSTRAP_ROOT}/fineract-provider/actuator/health"
+
 busybox httpd -f -p "0.0.0.0:${PUBLIC_PORT}" -h "${BOOTSTRAP_ROOT}" &
 BOOTSTRAP_PID=$!
-PROXY_PID=""
 WATCH_PID=""
 JAVA_PID=""
 
 cleanup() {
   [ -z "${WATCH_PID}" ] || kill "${WATCH_PID}" 2>/dev/null || true
-  [ -z "${PROXY_PID}" ] || kill "${PROXY_PID}" 2>/dev/null || true
   [ -z "${BOOTSTRAP_PID}" ] || kill "${BOOTSTRAP_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -73,17 +66,13 @@ export FINERACT_SERVER_SSL_ENABLED="false"
 export FINERACT_SERVER_PORT="${FINERACT_INTERNAL_PORT}"
 export FINERACT_SERVER_SERVLET_CONTEXT_PATH="${FINERACT_SERVER_SERVLET_CONTEXT_PATH:-/fineract-provider}"
 
-# Keep the initial validation deployment conservative on memory and DB connections.
 export FINERACT_HIKARI_MINIMUM_IDLE="${FINERACT_HIKARI_MINIMUM_IDLE:-1}"
-export FINERACT_HIKARI_MAXIMUM_POOL_SIZE="${FINERACT_HIKARI_MAXIMUM_POOL_SIZE:-5}"
-export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx240m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=48m -XX:+UseContainerSupport -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila -Dspring.main.lazy-initialization=true}"
+export FINERACT_HIKARI_MAXIMUM_POOL_SIZE="${FINERACT_HIKARI_MAXIMUM_POOL_SIZE:-4}"
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx220m -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=32m -XX:+UseContainerSupport -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila -Dspring.main.lazy-initialization=true}"
 
-# Jib-generated Fineract images expose the calculated runtime classpath and main class here.
 java -cp @/app/jib-classpath-file @/app/jib-main-class-file &
 JAVA_PID=$!
 
-# As soon as Fineract opens its internal HTTP port, replace the bootstrap server
-# with a transparent TCP proxy from Render's public port to Fineract.
 (
   while kill -0 "${JAVA_PID}" 2>/dev/null; do
     if socat -T1 -u /dev/null "TCP:127.0.0.1:${FINERACT_INTERNAL_PORT}" >/dev/null 2>&1; then

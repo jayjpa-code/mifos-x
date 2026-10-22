@@ -43,13 +43,45 @@ if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
 fi
 unset PGPASSWORD
 
-# Render must see a real HTTP listener and a successful health response while
-# Fineract warms up. A tiny per-connection helper avoids pulling another web
-# server into the image. It answers only during bootstrap; once Fineract opens
-# its internal port this listener is replaced by a transparent proxy.
+# During Fineract warm-up, answer Render's health check only. Real API calls
+# receive 503 so clients never mistake the bootstrap process for Fineract.
+export BOOTSTRAP_CORS_ORIGIN="${FINERACT_SECURITY_CORS_ALLOWED_ORIGIN_PATTERNS:-*}"
 cat > /tmp/bootstrap-http.sh <<'EOF'
 #!/bin/sh
-printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"status":"UP","component":"bootstrap","fineractReady":false}\n'
+set -eu
+
+IFS=' ' read -r METHOD PATH PROTO || exit 0
+ORIGIN=""
+while IFS= read -r LINE; do
+  LINE=$(printf '%s' "$LINE" | tr -d '\r')
+  [ -z "$LINE" ] && break
+  case "$LINE" in
+    [Oo][Rr][Ii][Gg][Ii][Nn]:*) ORIGIN=$(printf '%s' "$LINE" | sed 's/^[^:]*:[[:space:]]*//') ;;
+  esac
+done
+
+ALLOW_ORIGIN="${BOOTSTRAP_CORS_ORIGIN:-*}"
+CORS=""
+if [ "$ALLOW_ORIGIN" = "*" ] || [ -z "$ORIGIN" ] || [ "$ORIGIN" = "$ALLOW_ORIGIN" ]; then
+  CORS="Access-Control-Allow-Origin: ${ALLOW_ORIGIN}\r\nAccess-Control-Allow-Methods: GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD\r\nAccess-Control-Allow-Headers: Authorization,Content-Type,Accept,Origin,X-Requested-With,Fineract-Platform-TenantId,X-Correlation-ID\r\nAccess-Control-Expose-Headers: Location,Fineract-Platform-TenantId,X-Correlation-ID\r\nVary: Origin\r\n"
+  if [ "$ALLOW_ORIGIN" != "*" ]; then
+    CORS="${CORS}Access-Control-Allow-Credentials: true\r\n"
+  fi
+fi
+
+if [ "$METHOD" = "OPTIONS" ]; then
+  printf "HTTP/1.1 204 No Content\r\n${CORS}Connection: close\r\n\r\n"
+  exit 0
+fi
+
+if [ "$PATH" = "/fineract-provider/actuator/health" ]; then
+  BODY='{"status":"UP","component":"bootstrap","fineractReady":false}'
+  printf "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n${CORS}Connection: close\r\n\r\n%s\n" "$BODY"
+  exit 0
+fi
+
+BODY='{"status":"STARTING","component":"bootstrap","fineractReady":false,"message":"Apache Fineract is still starting"}'
+printf "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 15\r\n${CORS}Connection: close\r\n\r\n%s\n" "$BODY"
 EOF
 chmod 0755 /tmp/bootstrap-http.sh
 socat "TCP-LISTEN:${PUBLIC_PORT},fork,reuseaddr" EXEC:/tmp/bootstrap-http.sh &
@@ -69,7 +101,7 @@ export FINERACT_SERVER_SERVLET_CONTEXT_PATH="${FINERACT_SERVER_SERVLET_CONTEXT_P
 
 export FINERACT_HIKARI_MINIMUM_IDLE="${FINERACT_HIKARI_MINIMUM_IDLE:-1}"
 export FINERACT_HIKARI_MAXIMUM_POOL_SIZE="${FINERACT_HIKARI_MAXIMUM_POOL_SIZE:-4}"
-export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx220m -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=32m -XX:+UseContainerSupport -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila -Dspring.main.lazy-initialization=true}"
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms64m -Xmx220m -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=32m -XX:+UseContainerSupport -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Manila -Dspring.main.lazy-initialization=true -Dspring.data.jpa.repositories.bootstrap-mode=lazy}"
 
 java -cp @/app/jib-classpath-file @/app/jib-main-class-file &
 JAVA_PID=$!

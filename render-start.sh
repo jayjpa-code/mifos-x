@@ -43,15 +43,16 @@ if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
 fi
 unset PGPASSWORD
 
-# Render must see a real HTTP service and a successful health check while the
-# large Spring application warms up. Serve only a bootstrap root + health file.
-# Banking/API endpoints remain unavailable until Fineract itself is ready.
-BOOTSTRAP_ROOT="/tmp/render-bootstrap"
-mkdir -p "${BOOTSTRAP_ROOT}/fineract-provider/actuator"
-printf '%s\n' 'KoreNXT Fineract is starting' > "${BOOTSTRAP_ROOT}/index.html"
-printf '%s\n' '{"status":"UP","component":"bootstrap","fineractReady":false}' > "${BOOTSTRAP_ROOT}/fineract-provider/actuator/health"
-
-busybox httpd -f -p "0.0.0.0:${PUBLIC_PORT}" -h "${BOOTSTRAP_ROOT}" &
+# Render must see a real HTTP listener and a successful health response while
+# Fineract warms up. A tiny per-connection helper avoids pulling another web
+# server into the image. It answers only during bootstrap; once Fineract opens
+# its internal port this listener is replaced by a transparent proxy.
+cat > /tmp/bootstrap-http.sh <<'EOF'
+#!/bin/sh
+printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"status":"UP","component":"bootstrap","fineractReady":false}\n'
+EOF
+chmod 0755 /tmp/bootstrap-http.sh
+socat "TCP-LISTEN:${PUBLIC_PORT},fork,reuseaddr" EXEC:/tmp/bootstrap-http.sh &
 BOOTSTRAP_PID=$!
 WATCH_PID=""
 JAVA_PID=""
